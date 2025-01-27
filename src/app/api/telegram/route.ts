@@ -1,76 +1,153 @@
-import { NextRequest, NextResponse } from 'next/server';
-import TelegramBot from 'node-telegram-bot-api'; 
+import { NextRequest, NextResponse } from "next/server";
+import TelegramBot from "node-telegram-bot-api";
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN!, { polling: true });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const message = await req.json();
-    const chatId = message.message.chat.id;
+    console.log("Incoming request received.");
 
-    if (message.message.text === '/deploy') {
-      // Send a message to the user to confirm the deployment is being triggered
-      bot.sendMessage(chatId, 'Deploying your project to Vercel...');
+    const message: TelegramMessage = await req.json();
+    const chatId = message?.message?.chat?.id;
+    const text = message?.message?.text;
 
-      // Log environment variables to ensure they are set
-      console.log('Vercel API Token:', process.env.VERCEL_API_TOKEN);
-      console.log('Vercel Project Name:', process.env.VERCEL_TARGET_PROJECT);
+    if (!chatId || !text) {
+      console.error("Invalid message payload:", message);
+      throw new Error("Invalid Telegram message payload.");
+    }
 
-      // Trigger Vercel deployment using the specified request body
-      const response = await fetch('https://api.vercel.com/v13/deployments', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.VERCEL_API_TOKEN}`, // Vercel API token
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          gitMetadata: {
-            remoteUrl: process.env.GITHUB_REMOTE,
+    console.log("Processing command:", text);
+
+    if (text.startsWith("/configure")) {
+      bot.sendMessage(chatId, "Configuring deployment links...");
+      console.log("Configuring deployment links...");
+
+      const match = text.match(/^\/configure\s+(\S+)\s+([\s\S]+)$/);
+      if (!match) {
+        bot.sendMessage(
+          chatId,
+          "Invalid format. Use:\n/configure <URL> <JSON_CONFIG>"
+        );
+        return NextResponse.json({ error: "Invalid format" }, { status: 400 });
+      }
+
+      const [, deploymentUrl, rawConfig] = match;
+
+      let parsedConfig: number | string | object;
+      try {
+        const trimmedConfig = rawConfig.trim();
+        if (
+          (trimmedConfig.startsWith("{") && trimmedConfig.endsWith("}")) ||
+          (trimmedConfig.startsWith("[") && trimmedConfig.endsWith("]"))
+        ) {
+          parsedConfig = JSON.parse(trimmedConfig);
+        } else if (!isNaN(Number(trimmedConfig))) {
+          parsedConfig = Number(trimmedConfig);
+        } else {
+          parsedConfig = trimmedConfig;
+        }
+        console.log("Parsed configuration:", parsedConfig);
+      } catch {
+        bot.sendMessage(
+          chatId,
+          "Invalid configuration format. Please provide a valid JSON or a number."
+        );
+        return NextResponse.json({ error: "Invalid configuration format" }, { status: 400 });
+      }
+
+      const authEndpoint = `${process.env.PRODUCTION_URL}/api/auth`;
+
+      try {
+        console.log("Authenticating with endpoint:", authEndpoint);
+
+        const authResponse = await fetch(authEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: process.env.SUPABASE_EMAIL,
+            password: process.env.SUPABASE_PASSWORD,
+          }),
+        });
+
+        if (!authResponse.ok) {
+          const authError = await authResponse.json();
+          const errorMessage = `Authentication failed: ${authError.message || "Unknown error"}`;
+          console.error("Authentication error:", errorMessage);
+          bot.sendMessage(chatId, errorMessage);
+          return NextResponse.json({ error: errorMessage }, { status: 401 });
+        }
+
+        const { session } = await authResponse.json();
+        const accessToken = session?.access_token;
+
+        if (!accessToken) {
+          console.error("Access token not received.");
+          bot.sendMessage(chatId, "Authentication failed: Access token not received.");
+          return NextResponse.json({ error: "No access token received" }, { status: 401 });
+        }
+
+        const updateEndpoint = `${process.env.PRODUCTION_URL}/api/deployments/update-config`;
+
+        const payload = { url: deploymentUrl, config: parsedConfig };
+        console.log("Payload being sent to update-config:", JSON.stringify(payload, null, 2));
+
+        const configResponse = await fetch(updateEndpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
           },
-          gitSource: {
-            ref: 'main',
-            repoId: null,
-            sha: '',
-            type: 'github',
-            org: process.env.GITHUB_ORG,
-            repo: process.env.GITHUB_PROJECT,
-          },
-          monorepoManager: null,
-          name: process.env.VERCEL_TARGET_PROJECT,
-          project: process.env.VERCEL_TARGET_PROJECT,
-          projectSettings: {
-            buildCommand: null,
-            commandForIgnoringBuildStep: null,
-            devCommand: null,
-            framework: null,
-            installCommand: null,
-            nodeVersion: '22.x',
-            outputDirectory: null,
-            rootDirectory: null,
-            serverlessFunctionRegion: null,
-            skipGitConnectDuringLink: true,
-            sourceFilesOutsideRootDirectory: true,
-          },
-          target: 'staging',
-        }),
-      });
+          body: JSON.stringify(payload),
+        });
 
-      // Parse the response and log for debugging
-      const data = await response.json();
-      console.log('Vercel API Response:', data);
+        const responseText = await configResponse.text();
+        console.log("Response from update-config (raw):", responseText);
 
-      // Send a success or error message to the user
-      if (response.ok) {
-        bot.sendMessage(chatId, `Deployment successful!\nDeployment URL: ${data.url}`);
-      } else {
-        bot.sendMessage(chatId, `Error during deployment: ${data.message || 'Unknown error'}`);
+        try {
+          const responseBody = JSON.parse(responseText);
+          console.log("Parsed JSON response:", responseBody);
+
+          if (!configResponse.ok) {
+            const errorMessage = `Configuration update failed: ${responseBody.error || "Unknown error"}`;
+            console.error(errorMessage);
+            bot.sendMessage(chatId, errorMessage);
+            return NextResponse.json({ error: errorMessage }, { status: 500 });
+          }
+
+          bot.sendMessage(chatId, "Configuration updated successfully.");
+          return NextResponse.json({ status: "success" });
+        } catch {
+          console.error("Failed to parse response as JSON. Raw response:", responseText);
+          bot.sendMessage(
+            chatId,
+            "Configuration update failed. Unexpected response format from the server."
+          );
+          return NextResponse.json({ error: "Unexpected response format" }, { status: 500 });
+        }
+      } catch (authErr) {
+        console.error("Error during configuration update:", authErr); // Log the error
+        bot.sendMessage(chatId, "An unexpected error occurred. Please try again later.");
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
       }
     }
 
-    return NextResponse.json({ status: 'success' });
-
-  } catch (error) {
-    console.error('Error handling Telegram request:', error);
-    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+    bot.sendMessage(chatId, "Unsupported command. Please use /configure.");
+    return NextResponse.json({ error: "Unsupported command" }, { status: 400 });
+  } catch (generalErr) {
+    console.error("Error handling Telegram request:", generalErr); // Log the error
+    return NextResponse.json(
+      { error: "Internal Server Error", details: (generalErr as Error).message },
+      { status: 500 }
+    );
   }
+}
+
+// Type Definitions
+interface TelegramMessage {
+  message: {
+    chat: {
+      id: number;
+    };
+    text: string;
+  };
 }
