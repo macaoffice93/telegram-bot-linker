@@ -18,75 +18,75 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     console.log("Processing command:", text);
 
-    if (text === "/deploy") {
-      bot.sendMessage(chatId, "Deploying your project to Vercel...")
+    if (text.startsWith("/deploy")) {
+      const match = text.match(/^\/deploy\s*(\d+)?$/);
+      const deployCount = match && match[1] ? parseInt(match[1], 10) : 1; // Default to 1 deploy if no number is specified
+
+      if (isNaN(deployCount) || deployCount <= 0) {
+        bot.sendMessage(chatId, "Please provide a valid number of deployments (e.g., /deploy 3).")
+          .catch((err) => console.error("Failed to send invalid input message:", err));
+        return NextResponse.json({ error: "Invalid number of deployments" }, { status: 400 });
+      }
+
+      bot.sendMessage(chatId, `Starting ${deployCount} deployment(s)...`)
         .then(() => console.log("Deployment initialization message sent."))
         .catch((err) => console.error("Failed to send deployment message:", err));
 
-      console.log("Triggering Vercel deployment...");
+      console.log(`Triggering ${deployCount} Vercel deployments...`);
 
-      // Log environment variables to ensure they are set
-      console.log("Vercel API Token:", process.env.VERCEL_API_TOKEN);
-      console.log("Vercel Project Name:", process.env.VERCEL_TARGET_PROJECT);
-
-      try {
-        const response = await fetch("https://api.vercel.com/v13/deployments", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.VERCEL_API_TOKEN}`, // Vercel API token
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            gitMetadata: {
-              remoteUrl: process.env.GITHUB_REMOTE,
+      // Function to trigger a single deployment
+      const triggerDeployment = async (deployIndex: number) => {
+        try {
+          const response = await fetch("https://api.vercel.com/v13/deployments", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.VERCEL_API_TOKEN}`,
+              "Content-Type": "application/json",
             },
-            gitSource: {
-              ref: "main",
-              repoId: null,
-              sha: "",
-              type: "github",
-              org: process.env.GITHUB_ORG,
-              repo: process.env.GITHUB_PROJECT,
-            },
-            monorepoManager: null,
-            name: process.env.VERCEL_TARGET_PROJECT,
-            project: process.env.VERCEL_TARGET_PROJECT,
-            projectSettings: {
-              buildCommand: null,
-              commandForIgnoringBuildStep: null,
-              devCommand: null,
-              framework: null,
-              installCommand: null,
-              nodeVersion: "22.x",
-              outputDirectory: null,
-              rootDirectory: null,
-              serverlessFunctionRegion: null,
-              skipGitConnectDuringLink: true,
-              sourceFilesOutsideRootDirectory: true,
-            },
-            target: "staging",
-          }),
-        });
+            body: JSON.stringify({
+              gitMetadata: {
+                remoteUrl: process.env.GITHUB_REMOTE,
+              },
+              gitSource: {
+                ref: "main",
+                repoId: null,
+                sha: "",
+                type: "github",
+                org: process.env.GITHUB_ORG,
+                repo: process.env.GITHUB_PROJECT,
+              },
+              name: process.env.VERCEL_TARGET_PROJECT,
+              project: process.env.VERCEL_TARGET_PROJECT,
+              target: "staging",
+            }),
+          });
 
-        const data = await response.json();
-        console.log("Vercel API Response:", data);
+          const data = await response.json();
+          console.log(`Vercel API Response for deployment ${deployIndex + 1}:`, data);
 
-        if (response.ok) {
-          bot.sendMessage(chatId, `Deployment successful!\nDeployment URL: ${data.url}`)
-            .then(() => console.log("Success message sent."))
-            .catch((err) => console.error("Failed to send success message:", err));
-        } else {
-          bot.sendMessage(chatId, `Error during deployment: ${data.message || "Unknown error"}`)
-            .then(() => console.log("Error message sent."))
-            .catch((err) => console.error("Failed to send error message:", err));
+          if (response.ok) {
+            await bot.sendMessage(chatId, `Deployment ${deployIndex + 1} successful!\nURL: ${data.url}`);
+          } else {
+            await bot.sendMessage(
+              chatId,
+              `Deployment ${deployIndex + 1} failed: ${data.message || "Unknown error"}`
+            );
+          }
+        } catch (err) {
+          console.error(`Error during deployment ${deployIndex + 1}:`, err);
+          await bot.sendMessage(
+            chatId,
+            `An unexpected error occurred during deployment ${deployIndex + 1}.`
+          );
         }
-      } catch (err) {
-        console.error("Error during Vercel deployment:", err);
-        bot.sendMessage(chatId, "An unexpected error occurred during deployment.")
-          .catch((err) => console.error("Failed to send unexpected error message:", err));
+      };
+
+      // Trigger deployments sequentially
+      for (let i = 0; i < deployCount; i++) {
+        await triggerDeployment(i);
       }
 
-      return NextResponse.json({ status: "Deployment initiated" });
+      return NextResponse.json({ status: "Deployments completed" });
     }
 
     if (text.startsWith("/configure")) {
