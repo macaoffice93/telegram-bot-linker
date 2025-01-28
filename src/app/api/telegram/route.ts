@@ -3,6 +3,9 @@ import TelegramBot from "node-telegram-bot-api";
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN!, { polling: false });
 
+// Parse allowed chat ID from environment variable
+const ALLOWED_CHAT_ID = parseInt(process.env.ALLOWED_CHAT_ID || "", 10);
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     console.log("Incoming request received.");
@@ -17,7 +20,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     console.log("Processing command:", text);
+    console.log("Chat ID:", chatId);
 
+    // Restrict commands to the allowed chat ID
+    if (chatId !== ALLOWED_CHAT_ID) {
+      console.log(`Unauthorized chat ID: ${chatId}. Ignoring the command.`);
+
+      // Send a message to the chat explaining it's unauthorized
+      bot.sendMessage(chatId, "This chat is not authorized to use this bot.")
+        .then(() => console.log(`Unauthorized message sent to chat ID: ${chatId}`))
+        .catch((err) => console.error("Failed to send unauthorized chat message:", err));
+
+      return NextResponse.json({ error: "Unauthorized chat ID" }, { status: 403 });
+    }
+
+
+    // Process /deploy command
     if (text.startsWith("/deploy")) {
       const match = text.match(/^\/deploy\s*(\d+)?$/);
       const deployCount = match && match[1] ? parseInt(match[1], 10) : 1; // Default to 1 deploy if no number is specified
@@ -34,7 +52,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       console.log(`Triggering ${deployCount} Vercel deployments...`);
 
-      // Function to trigger a single deployment
       const triggerDeployment = async (deployIndex: number) => {
         try {
           const response = await fetch("https://api.vercel.com/v13/deployments", {
@@ -65,7 +82,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           console.log(`Vercel API Response for deployment ${deployIndex + 1}:`, data);
 
           if (response.ok) {
-            await bot.sendMessage(chatId, `Deployment ${deployIndex + 1} successful!\nURL: ${data.url}`);
+            await bot.sendMessage(chatId, `Deployment ${deployIndex + 1} successful!\nURL: https://${data.url}`);
           } else {
             await bot.sendMessage(
               chatId,
@@ -81,7 +98,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
       };
 
-      // Trigger deployments sequentially
       for (let i = 0; i < deployCount; i++) {
         await triggerDeployment(i);
       }
@@ -89,6 +105,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ status: "Deployments completed" });
     }
 
+    // Process /configure command
     if (text.startsWith("/configure")) {
       bot.sendMessage(chatId, "Configuring deployment links...")
         .then(() => console.log("Configuration initialization message sent."))
@@ -132,8 +149,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const authEndpoint = `${process.env.PRODUCTION_URL}/api/auth`;
 
       try {
-        console.log("Authenticating with endpoint:", authEndpoint);
-
         const authResponse = await fetch(authEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -191,7 +206,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             return NextResponse.json({ error: errorMessage }, { status: 500 });
           }
 
-          bot.sendMessage(chatId, "Configuration updated successfully.")
+          bot.sendMessage(chatId, `Configuration updated successfully. Link: ${deploymentUrl}/api/config`)
             .then(() => console.log("Configuration success message sent."))
             .catch((err) => console.error("Failed to send success message:", err));
           return NextResponse.json({ status: "success" });
